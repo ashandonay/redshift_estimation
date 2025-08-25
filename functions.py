@@ -3,6 +3,7 @@ import astropy.units as u
 from speclite import filters
 from astropy.constants import h, c, k_B, sigma_sb
 from astropy.cosmology import Planck18
+from lsstetc import s0
 
 def F_blackbody(wavelength, T = 5000 * u.K):
     """
@@ -68,6 +69,9 @@ def F_observed(z, wavelength, T = 5000 * u.K):
     flux : array
         Flux in wavelength (erg / s / cm² / Å).
     """
+    if not isinstance(z, np.ndarray):
+        z = np.array([z])
+    z = z.reshape(-1, 1)
     return L_blackbody(wavelength.reshape(1, -1) / (1+z), T) / ((1+z) * (4 * np.pi * Planck18.luminosity_distance(z).to(u.cm)**2))
 
 def F_b(z, f, T = 5000 * u.K):
@@ -117,22 +121,39 @@ def photon_count(t_exp, z, f, A = 33.2 * u.m**2, T = 5000 * u.K):
 
 def M_b(z, f, T = 5000 * u.K):
     """
-    Compute the magnitude of a blackbody at a given redshift, filter, temperature, and radius.
+    Compute the photo flux magnitude of a blackbody at a given redshift, filter, temperature, and radius.
+    Uses photon flux and is calibrated to match the s0 zeropoint system for LSST.
 
     Args
     z : float (or array)
         Redshift.
     f (filter) : str
         LSST filter name. "u", "g", "r", "i", "z", "y"
+    T (temperature) : float
+        Temperature with units of Kelvin.
 
     Returns
     -------
     magnitude : float (or array)
-        Magnitude in the input filter band.
+        Magnitude in the input filter band based on photon flux.
     """
     # convert z to array if it is a scalar
     if not isinstance(z, np.ndarray):
         z = np.array([z])
-    # get the wavelength coverage of the filter
-    wlen = filters.load_filter("lsst2023-"+f).wavelength * u.AA
-    return filters.load_filter("lsst2023-"+f).get_ab_magnitude(F_observed(z.reshape(-1, 1), wlen, T), wlen)
+    
+    # Get photon flux directly from F_b (photons/s/cm²)
+    photon_flux = F_b(z, f, T)
+    
+
+    # s0 is in photons/s, so we need to account for the effective area
+    A = 319/9.6 # LSST effective area in m^2 from lsstetc.py
+    A_cm2 = A * 1e4 * u.cm**2 # convert to cm^2
+    
+    # Get the photons/sec for the whole detector
+    photon_flux_pixel = photon_flux * A_cm2
+    
+    # Convert to magnitude using the s0 zeropoint system
+    # where mag=24.0 corresponds to s0 photons/s/pixel
+    magnitude = 24.0 - 2.5 * np.log10(photon_flux_pixel / (s0[f] * (1 / (u.s))))
+    
+    return magnitude

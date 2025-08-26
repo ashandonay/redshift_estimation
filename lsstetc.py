@@ -189,7 +189,6 @@ class ETC(object):
     def _compute_snr_from_pixels(self, nvisits, pixels_array, mask_array):
         """Compute SNR directly from pixel weights (no image drawing needed)."""
         masked_pixels = pixels_array * mask_array
-        print(masked_pixels.shape)
         # Compute SNR for each batch element
         signal = (masked_pixels**2).sum(axis=(-2, -1))  # Sum over height, width
         noise = np.sqrt((masked_pixels**2 * self.get_sky(nvisits)[:, np.newaxis, np.newaxis, np.newaxis]).sum(axis=(-2, -1)))

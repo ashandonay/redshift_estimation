@@ -10,7 +10,7 @@ import time
 import matplotlib.pyplot as plt
 from lsstetc import ETC
 
-def main(test_mags=np.linspace(30.0, 20.0, 500)):
+def main(test_mags=np.linspace(30.0, 20.0, 500), nvisits=np.array([20])):
     print("Verifying the fast method matches the traditional GalSim withFlux")
     print("=" * 70)
     
@@ -36,14 +36,14 @@ def main(test_mags=np.linspace(30.0, 20.0, 500)):
     snrs = []
     mag_errs = []
     for m in test_mags:
-        flux = etc.s0 * 10**(-0.4*(m - 24.0)) * etc.exptime
+        flux = etc.s0 * 10**(-0.4*(m - 24.0)) * nvisits * etc.visit_time
         profile_with_flux = profile.withFlux(flux)
         img = galsim.ImageD(etc.stamp_size, etc.stamp_size, scale=etc.pixel_scale)
         profile_with_flux.drawImage(image=img)
         galsim_imgs.append(img.array)
-        snr, signal, noise = etc.SNR(profile, m)
+        snr, signal, noise = etc.SNR(profile, m, nvisits)
         snrs.append(snr)
-        mag_errs.append(etc.err(profile, m))
+        mag_errs.append(etc.err(profile, m, nvisits))
 
     galsim_imgs = np.array(galsim_imgs)
     snrs = np.array(snrs)
@@ -56,9 +56,9 @@ def main(test_mags=np.linspace(30.0, 20.0, 500)):
     print("\nMethod 2: Fast approach")
     print("-" * 50)
     start_time = time.time()
-    fast_imgs, _ = etc.get_pixel_values(test_mags)
-    fast_snrs = etc.batch_snr(test_mags)
-    fast_mag_errs = etc.mag_err(test_mags)
+    fast_imgs, _ = etc.get_pixel_values(test_mags, nvisits)
+    fast_snrs = etc.batch_snr(test_mags, nvisits)
+    fast_mag_errs = etc.mag_err(test_mags, nvisits)
 
     fast_time = time.time() - start_time
     
@@ -105,15 +105,6 @@ def main(test_mags=np.linspace(30.0, 20.0, 500)):
         print("FAILURE: Magnitude error values don't match!")
         print(f"Magnitude error differences: {mag_errs[np.where(~mag_err_match)]}")
     
-    
-    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-    ax[0].imshow(galsim_imgs[0])
-    ax[1].imshow(fast_imgs[0])
-    ax[0].set_title("Traditional method")
-    ax[1].set_title("Fast method")
-    fig.colorbar(ax[0].imshow(galsim_imgs[0]), ax=ax[0])
-    fig.colorbar(ax[1].imshow(fast_imgs[0]), ax=ax[1])
-    fig.savefig("image_comparison.png")
     
     # Performance comparison
     print("\nPerformance Comparison")

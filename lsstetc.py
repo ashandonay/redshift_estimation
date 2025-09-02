@@ -68,7 +68,7 @@ class ETC(object):
         flux = self.s0 * 10**(-0.4*(mag - 24.0)) * nvisits * self.visit_time
         profile = profile.withFlux(flux)
         profile.drawImage(image=img)
-        sigma_sky = np.sqrt(self.get_sky(nvisits))
+        sigma_sky = np.sqrt(self.get_sky_var(nvisits))
         if noise:
             gd = galsim.GaussianNoise(bd, sigma=sigma_sky)
             img.addNoise(gd)
@@ -76,11 +76,11 @@ class ETC(object):
     
     def SNR(self, profile, mag, nvisits):
         img = self.draw(profile, mag, nvisits, noise=False)
-        sigma_sky = np.sqrt(self.get_sky(nvisits))
+        sigma_sky = np.sqrt(self.get_sky_var(nvisits))
         mask = img.array > (self.threshold * sigma_sky)
         imgsqr = img.array**2*mask
         signal = imgsqr.sum()
-        noise = np.sqrt((imgsqr * self.get_sky(nvisits)).sum())
+        noise = np.sqrt((imgsqr * self.get_sky_var(nvisits)).sum())
         return signal / noise, signal, noise
 
     def nphot(self, mag, nvisits):
@@ -116,28 +116,31 @@ class ETC(object):
         
         return base_img.array.copy()
 
-    def get_sky(self, nvisits):
+    def get_sky_var(self, nvisits):
+        """Get the sky variance in photons per pixel."""
         exptime = np.atleast_1d(nvisits) * self.visit_time
         sky = sbar[self.band] * exptime * self.pixel_scale**2
         return sky
     
     def get_pixel_values(self, mags, nvisits):
-        """Ultra-fast method using pre-calibrated base profile for magnitude calculations.
+        """
+        Vectorized method using pre-calibrated base profile for magnitude calculations.
         
         This method uses pre-computed base profile values to rapidly scale
         for different magnitudes without redrawing images or recalculating xValue.
         
         Parameters
         ----------
-        profile : galsim.GSObject
-            Galaxy profile to use for calculations
         mags : array-like
             Array of magnitude values
+        nvisits : array-like
+            Array of number of visits
             
         Returns
         -------
         tuple
-            (pixels_array, mask_array) computed using pre-calibrated base profile
+            pixels_array: Array of image pixel values
+            mask_array: Array of mask values
         """
         
         mags = np.atleast_1d(mags)
@@ -155,7 +158,7 @@ class ETC(object):
         # Single NumPy operation: scale base profile for all magnitudes
         pixels_array = fluxes[..., np.newaxis, np.newaxis] * self._base_img
 
-        sigma_sky = np.sqrt(self.get_sky(nvisits))
+        sigma_sky = np.sqrt(self.get_sky_var(nvisits))
         # Vectorized mask calculation
         mask_array = pixels_array > (self.threshold * sigma_sky)[:, np.newaxis, np.newaxis, np.newaxis]
         
@@ -173,6 +176,8 @@ class ETC(object):
         ----------
         mags : array-like
             Array of magnitude values
+        nvisits : array-like
+            Array of number of visits
             
         Returns
         -------
@@ -187,11 +192,27 @@ class ETC(object):
         return snr_array
 
     def _compute_snr_from_pixels(self, nvisits, pixels_array, mask_array):
-        """Compute SNR directly from pixel weights (no image drawing needed)."""
+        """
+        Compute the flux SNR directly from pixel weights (no image drawing needed).
+        
+        Parameters
+        ----------
+        nvisits : array-like
+            Array of number of visits
+        pixels_array : numpy.ndarray
+            Array of pixel values
+        mask_array : numpy.ndarray
+            Array of mask values
+
+        Returns
+        -------
+        numpy.ndarray
+            Array of flux SNR values
+        """
         masked_pixels = pixels_array * mask_array
         # Compute SNR for each batch element
         signal = (masked_pixels**2).sum(axis=(-2, -1))  # Sum over height, width
-        noise = np.sqrt((masked_pixels**2 * self.get_sky(nvisits)[:, np.newaxis, np.newaxis, np.newaxis]).sum(axis=(-2, -1)))
+        noise = np.sqrt((masked_pixels**2 * self.get_sky_var(nvisits)[:, np.newaxis, np.newaxis, np.newaxis]).sum(axis=(-2, -1)))
         
         # Handle division by zero
         snr_array = np.where(noise == 0, 
@@ -200,17 +221,18 @@ class ETC(object):
         return snr_array
 
     def mag_err(self, mags, nvisits):
-        """Compute magnitude errors from pixel weights using ultra-fast method.
+        """
+        Compute magnitude errors from pixel weights using ultra-fast method.
         
         This method computes magnitude errors efficiently using the ultra-fast
         pixel weight computation and SNR calculation.
         
         Parameters
         ----------
-        profile : galsim.GSObject
-            Galaxy profile to use for calculations
         mags : array-like
             Array of magnitude values
+        nvisits : array-like
+            Array of number of visits
             
         Returns
         -------

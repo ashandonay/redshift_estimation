@@ -145,22 +145,22 @@ class ETC(object):
         
         mags = np.atleast_1d(mags)
         nvisits = np.atleast_1d(nvisits)
-        n_mags = len(mags)
-        n_exps = len(nvisits)
         
-        # Initialize arrays
-        pixels_array = np.zeros((n_exps, n_mags, self.stamp_size, self.stamp_size))
-        mask_array = np.zeros((n_exps, n_mags, self.stamp_size, self.stamp_size), dtype=bool)
+        if nvisits.shape[-1] != 1:
+            nvisits_reshaped = nvisits[..., np.newaxis]
+        else:
+            nvisits_reshaped = nvisits
         
         # Vectorized flux calculation for all magnitudes at once
-        fluxes = self.s0 * 10**(-0.4*(mags.reshape(1, -1) - 24.0)) * nvisits.reshape(-1, 1) * self.visit_time
+        # Broadcast mags on the rightmost dimension (no extra newaxis needed!)
+        fluxes = self.s0 * 10**(-0.4*(mags - 24.0)) * nvisits_reshaped * self.visit_time
         
         # Single NumPy operation: scale base profile for all magnitudes
         pixels_array = fluxes[..., np.newaxis, np.newaxis] * self._base_img
 
-        sigma_sky = np.sqrt(self.get_sky_var(nvisits))
+        sigma_sky = np.sqrt(self.get_sky_var(nvisits_reshaped))
         # Vectorized mask calculation
-        mask_array = pixels_array > (self.threshold * sigma_sky)[:, np.newaxis, np.newaxis, np.newaxis]
+        mask_array = pixels_array > (self.threshold * sigma_sky[..., np.newaxis, np.newaxis])
         
         return pixels_array, mask_array
 
@@ -209,10 +209,18 @@ class ETC(object):
         numpy.ndarray
             Array of flux SNR values
         """
+        nvisits = np.atleast_1d(nvisits)
+        if nvisits.shape[-1] != 1:
+            nvisits_reshaped = nvisits[..., np.newaxis]
+        else:
+            nvisits_reshaped = nvisits
+        
         masked_pixels = pixels_array * mask_array
         # Compute SNR for each batch element
-        signal = (masked_pixels**2).sum(axis=(-2, -1))  # Sum over height, width
-        noise = np.sqrt((masked_pixels**2 * self.get_sky_var(nvisits)[:, np.newaxis, np.newaxis, np.newaxis]).sum(axis=(-2, -1)))
+        signal = (masked_pixels**2).sum(axis=(-2, -1))  # Sum over height, width (last 2 dimensions)
+        # Add dimensions to sky_var for spatial dims only (mags dimension already present from broadcasting)
+        sky_var = self.get_sky_var(nvisits_reshaped)[..., np.newaxis, np.newaxis]
+        noise = np.sqrt((masked_pixels**2 * sky_var).sum(axis=(-2, -1)))
         
         # Handle division by zero
         snr_array = np.where(noise == 0, 
@@ -241,7 +249,7 @@ class ETC(object):
         """
         # Get SNR values using vectorized method
         snr_array = self.batch_snr(mags, nvisits)
-        
+
         # Calculate magnitude errors
         errs = 2.5 / (np.log(10) * snr_array)
         

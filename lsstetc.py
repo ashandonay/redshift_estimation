@@ -15,57 +15,68 @@ import galsim
 # Some constants
 # --------------
 #
-# LSST effective area in meters^2
-A = 319/9.6  # etendue / FoV.  I *think* this includes vignetting
+# Photometric zeropoints from SMTN-002 (v1.9 throughputs)
+# These are AB magnitudes that produce 1 count per second
+# Based on syseng_throughputs v1.9 with triple silver mirror coatings
+# and as-measured filter/lens/detector throughputs
+# https://smtn-002.lsst.io
+# Encodes the physical properties of the telescope and detector system including effective area and throughput.
+s0 = {'u': 26.52,
+      'g': 28.51,
+      'r': 28.36,
+      'i': 28.17,
+      'z': 27.78,
+      'y': 26.82}
 
-# zeropoints from DK notes in photons per second per pixel
-# should eventually compute these on the fly from filter throughput functions.
-s0 = {'u': A*0.732,
-      'g': A*2.124,
-      'r': A*1.681,
-      'i': A*1.249,
-      'z': A*0.862,
-      'y': A*0.452}
-# Sky brightnesses in AB mag / arcsec^2.
-# stole these from http://www.lsst.org/files/docs/gee_137.28.pdf
-# should eventually construct a sky SED (varies with the moon phase) and integrate to get these
-B = {'u': 22.8,
-     'g': 22.2,
-     'r': 21.3,
-     'i': 20.3,
-     'z': 19.1,
-     'y': 18.1}
-# number of visits
-# From LSST Science Book
-fiducial_nvisits = {'u': 56,
-                    'g': 80,
-                    'r': 180,
-                    'i': 180,
-                    'z': 164,
-                    'y': 164}
+# Sky brightnesses in AB mag / arcsec^2 (zenith, dark sky)
+# From SMTN-002: https://smtn-002.lsst.io
+# Based on dark sky spectrum from UVES/Gemini/ESO, normalized to match SDSS observations
+B = {'u': 23.05,
+     'g': 22.25,
+     'r': 21.2,
+     'i': 20.46,
+     'z': 19.61,
+     'y': 18.6}
+
 # Sky brightness per arcsec^2 per second
+# At sky magnitude B[k]: flux = 10^(-0.4*(B[k] - s0[k])) photons/sec/arcsec^2
 sbar = {}
 for k in B:
-    sbar[k] = s0[k] * 10**(-0.4*(B[k]-24.0))
+    sbar[k] = 10**(-0.4*(B[k] - s0[k]))
+
+# Number of visits over 10 years from LSST Science Book (table 1.1)
+fiducial_nvisits = {'u': 70,
+                    'g': 100,
+                    'r': 230,
+                    'i': 230,
+                    'z': 200,
+                    'y': 200}
 
 # And some random numbers for drawing
 bd = galsim.BaseDeviate(1)
 
 
 class ETC(object):
-    def __init__(self, band, profile=None, pixel_scale=None, stamp_size=None, threshold=0.0, visit_time=30.0):
+    def __init__(self, band, profile=None, pixel_scale=0.2, stamp_size=31, threshold=0.0, 
+                 exposure_time=15.0, n_exp_per_visit=2, read_noise=8.8, dark_current=0.2):
         
         self.pixel_scale = pixel_scale
         self.stamp_size = stamp_size
         self.threshold = threshold
         self.band = band
-        self.visit_time =  visit_time
+        self.exposure_time = exposure_time  # seconds per exposure (15s for LSST)
+        self.n_exp_per_visit = n_exp_per_visit  # number of exposures per visit (2 for LSST)
+        self.visit_time = exposure_time * n_exp_per_visit  # total time per visit (30s for LSST)
+        self.read_noise = read_noise  # electrons per pixel per exposure
+        self.dark_current = dark_current  # electrons per pixel per second
         self.s0 = s0[band]
         self._base_img = self._calculate_base_profile(profile)
                 
     def draw(self, profile, mag, nvisits, noise=False):
         img = galsim.ImageD(self.stamp_size, self.stamp_size, scale=self.pixel_scale)
-        flux = self.s0 * 10**(-0.4*(mag - 24.0)) * nvisits * self.visit_time
+        # At zeropoint magnitude: 1 photon/sec
+        # At magnitude m: 10^(-0.4*(m - zeropoint)) photons/sec
+        flux = 10**(-0.4*(mag - self.s0)) * nvisits * self.visit_time
         profile = profile.withFlux(flux)
         profile.drawImage(image=img)
         sigma_sky = np.sqrt(self.get_sky_var(nvisits))
@@ -80,11 +91,18 @@ class ETC(object):
         mask = img.array > (self.threshold * sigma_sky)
         imgsqr = img.array**2*mask
         signal = imgsqr.sum()
-        noise = np.sqrt((imgsqr * self.get_sky_var(nvisits)).sum())
+        # Total variance: sky + source Poisson + dark current + read noise
+        # All variances in electrons^2
+        sky_var = self.get_sky_var(nvisits)
+        dark_var = self.get_dark_var(nvisits)
+        source_var = img.array * mask
+        read_var = self.get_read_var(nvisits)
+        total_var = sky_var + source_var + dark_var + read_var
+        noise = np.sqrt((imgsqr * total_var).sum())
         return signal / noise, signal, noise
 
     def nphot(self, mag, nvisits):
-        return self.s0 * 10**(-0.4*(mag - 24.0)) * nvisits * self.visit_time
+        return 10**(-0.4*(mag - self.s0)) * nvisits * self.visit_time
 
     def err(self, profile, mag, nvisits):
         snr, signal, noise = self.SNR(profile, mag, nvisits)
@@ -122,6 +140,27 @@ class ETC(object):
         sky = sbar[self.band] * exptime * self.pixel_scale**2
         return sky
     
+    def get_read_var(self, nvisits):
+        """Get the read noise variance per pixel (in electrons^2).
+        
+        Each visit has n_exp_per_visit exposures, each with independent read noise.
+        For LSST: 2 exposures per visit, so read_var = read_noise^2 * 2 * nvisits
+        """
+        nvisits = np.atleast_1d(nvisits)
+        n_exposures = nvisits * self.n_exp_per_visit
+        return self.read_noise**2 * n_exposures
+    
+    def get_dark_var(self, nvisits):
+        """Get the dark current variance per pixel (in electrons).
+        
+        Dark current follows Poisson statistics, so variance = mean.
+        Mean dark current = dark_current_rate * total_exposure_time
+        For LSST: 2 exposures of 15s each = 30s total per visit
+        """
+        nvisits = np.atleast_1d(nvisits)
+        total_exptime = nvisits * self.visit_time
+        return self.dark_current * total_exptime
+    
     def get_pixel_values(self, mags, nvisits):
         """
         Vectorized method using pre-calibrated base profile for magnitude calculations.
@@ -152,8 +191,8 @@ class ETC(object):
             nvisits_reshaped = nvisits
         
         # Vectorized flux calculation for all magnitudes at once
-        # Broadcast mags on the rightmost dimension (no extra newaxis needed!)
-        fluxes = self.s0 * 10**(-0.4*(mags - 24.0)) * nvisits_reshaped * self.visit_time
+        # At zeropoint magnitude: 1 photon/sec; at mag m: 10^(-0.4*(m - zeropoint))
+        fluxes = 10**(-0.4*(mags - self.s0)) * nvisits_reshaped * self.visit_time
         
         # Single NumPy operation: scale base profile for all magnitudes
         pixels_array = fluxes[..., np.newaxis, np.newaxis] * self._base_img
@@ -216,13 +255,17 @@ class ETC(object):
             nvisits_reshaped = nvisits
         
         masked_pixels = pixels_array * mask_array
-        # Compute SNR for each batch element
-        signal = (masked_pixels**2).sum(axis=(-2, -1))  # Sum over height, width (last 2 dimensions)
-        # Add dimensions to sky_var for spatial dims only (mags dimension already present from broadcasting)
-        sky_var = self.get_sky_var(nvisits_reshaped)[..., np.newaxis, np.newaxis]
-        noise = np.sqrt((masked_pixels**2 * sky_var).sum(axis=(-2, -1)))
+        signal = (masked_pixels**2).sum(axis=(-2, -1))
         
-        # Handle division by zero
+        # Total variance: sky + source Poisson + dark current + read noise
+        # All variances in electrons^2 (assuming gain=1)
+        sky_var = self.get_sky_var(nvisits_reshaped)[..., np.newaxis, np.newaxis]
+        src_var = masked_pixels  # Source Poisson noise (mean=variance)
+        dark_var = self.get_dark_var(nvisits_reshaped)[..., np.newaxis, np.newaxis]
+        read_var = self.get_read_var(nvisits_reshaped)[..., np.newaxis, np.newaxis]
+        total_var = sky_var + src_var + dark_var + read_var
+        noise = np.sqrt((masked_pixels**2 * total_var).sum(axis=(-2, -1)))
+        
         snr_array = np.where(noise == 0, 
                             np.where(signal > 0, float('inf'), 0.0), 
                             signal / noise)
